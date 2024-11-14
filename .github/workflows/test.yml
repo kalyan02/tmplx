@@ -28,8 +28,32 @@ jobs:
     - name: Run vet
       run: go vet ./...
 
-    - name: Run tests
-      run: go test -v ./...
+    - name: Run tests with coverage
+      run: |
+        go test -race -coverprofile=coverage.out -covermode=atomic -v ./...
+        go tool cover -func=coverage.out > coverage.txt
+        echo "COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')" >> $GITHUB_ENV
 
-    - name: Run tests with race detector
-      run: go test -race -v ./... 
+    - name: Generate coverage badge
+      uses: emibcn/badge-action@v2.0.2
+      with:
+        label: 'coverage'
+        status: ${{ env.COVERAGE }}%
+        color: ${{ env.COVERAGE >= 80 && 'green' || env.COVERAGE >= 70 && 'yellow' || 'red' }}
+        path: coverage-badge.svg
+
+    - name: Push badge to badges branch
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git fetch --all
+        if git show-ref --quiet refs/heads/badges; then
+          git checkout badges
+        else
+          git checkout --orphan badges
+          git rm -rf .
+        fi
+        mv coverage-badge.svg coverage.svg
+        git add coverage.svg
+        git commit -m "Update coverage badge" || exit 0
+        git push origin badges --force
