@@ -306,13 +306,8 @@ func (e *TemplateEngine) resolveInheritance(name string, visited map[string]bool
 		}
 
 		// Copy all associated templates from parent
-		for _, t := range parentTemplate.Templates() {
-			if t.Name() != parentTemplate.Name() {
-				_, err = baseTemplate.AddParseTree(t.Name(), t.Tree)
-				if err != nil {
-					return nil, fmt.Errorf("error copying parent template %s: %v", t.Name(), err)
-				}
-			}
+		if err := e.copyTemplates(baseTemplate, parentTemplate); err != nil {
+			return nil, err
 		}
 
 		//DebugTemplate(baseTemplate)
@@ -333,7 +328,7 @@ func (e *TemplateEngine) resolveInheritance(name string, visited map[string]bool
 
 		// Copy all block definitions from includes
 		if includeTmpl != nil {
-			err = e.copyIncludes(baseTemplate, includeTmpl)
+			err = e.copyTemplates(baseTemplate, includeTmpl)
 			if err != nil {
 				return nil, err
 			}
@@ -364,7 +359,7 @@ func (e *TemplateEngine) resolveInheritance(name string, visited map[string]bool
 
 	// Copy block definitions from includes first
 	if includeTmpl != nil {
-		err = e.copyIncludes(baseTemplate, includeTmpl)
+		err = e.copyTemplates(baseTemplate, includeTmpl)
 		if err != nil {
 			return nil, err
 		}
@@ -396,7 +391,7 @@ func (e *TemplateEngine) copyBlockTemplates(baseTemplate *template.Template, chi
 	return nil
 }
 
-func (e *TemplateEngine) copyIncludes(baseTemplate *template.Template, includeTmpl *template.Template) error {
+func (e *TemplateEngine) copyTemplates(baseTemplate *template.Template, includeTmpl *template.Template) error {
 	for _, t := range includeTmpl.Templates() {
 		if t.Name() != "" && t.Name() != includeTmpl.Name() {
 			_, err := baseTemplate.AddParseTree(t.Name(), t.Tree)
