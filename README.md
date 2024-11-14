@@ -1,5 +1,6 @@
-
 # TMPLX
+
+[![Tests](https://github.com/kalyan02/tmplx/actions/workflows/test.yml/badge.svg)](https://github.com/kalyan02/tmplx/actions/workflows/test.yml)
 
 TMPLX is a Go template engine that extends the standard `html/template` package to provide Django/Jinja2-style template inheritance, blocks, and includes. It maintains the security and familiar syntax of Go templates while adding powerful features for building complex template hierarchies.
 
