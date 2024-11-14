@@ -2,7 +2,7 @@ package tmplx
 
 import (
 	"fmt"
-	"net/http"
+	"io"
 )
 
 var (
@@ -23,17 +23,11 @@ func Load(opts Options) error {
 }
 
 // Render renders a template and returns the output as a string
-func Render(w http.ResponseWriter, name string, data H) (string, error) {
+func Render(name string, data H) (string, error) {
 	return DefaultEngine.Render(name, data)
 }
 
 // RenderResponse renders a template and writes it to the response writer
-func RenderResponse(w http.ResponseWriter, name string, data H) error {
-	out, err := DefaultEngine.Render(name, data)
-	if err != nil {
-		return err
-	}
-
-	_, err = w.Write([]byte(out))
-	return err
+func RenderResponse(w io.Writer, name string, data H) error {
+	return DefaultEngine.RenderResponse(w, name, data)
 }
