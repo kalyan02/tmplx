@@ -42,8 +42,18 @@ jobs:
         color: ${{ env.COVERAGE >= 80 && 'green' || env.COVERAGE >= 70 && 'yellow' || 'red' }}
         path: coverage-badge.svg
 
-    - name: Upload coverage badge
-      uses: actions/upload-artifact@v3
-      with:
-        name: coverage-badge
-        path: coverage-badge.svg
+    - name: Push badge to badges branch
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git fetch --all
+        if git show-ref --quiet refs/heads/badges; then
+          git checkout badges
+        else
+          git checkout --orphan badges
+          git rm -rf .
+        fi
+        mv coverage-badge.svg coverage.svg
+        git add coverage.svg
+        git commit -m "Update coverage badge" || exit 0
+        git push origin badges --force
