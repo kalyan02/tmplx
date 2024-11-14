@@ -35,7 +35,7 @@ func setupTestTemplates(t testing.TB) (string, func()) {
 
 	// Cleanup function
 	cleanup := func() {
-		os.RemoveAll(tempDir)
+		_ = os.RemoveAll(tempDir)
 	}
 
 	return tempDir, cleanup

@@ -3,6 +3,7 @@ package tmplx
 import (
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -61,15 +62,6 @@ type templateTree struct {
 	blocks   map[string]string
 	includes []string
 }
-
-// blockNode represents a parsed block with its content and position
-// type blockNode struct {
-// 	name     string
-// 	content  string
-// 	start    int
-// 	end      int
-// 	children []*blockNode
-// }
 
 // Options holds configuration options for the template engine
 type Options struct {
@@ -549,56 +541,33 @@ func (e *TemplateEngine) MustGetTemplate(name string) *template.Template {
 	return tmpl
 }
 
-func (e *TemplateEngine) Render(name string, data interface{}) (string, error) {
+func (e *TemplateEngine) renderTo(w io.Writer, name string, data interface{}) error {
 	tmpl, exists := e.cache[name]
 	if !exists {
-		return "", fmt.Errorf("template %s not found", name)
+		return fmt.Errorf("template %s not found", name)
 	}
 
-	var buf strings.Builder
-
-	//DebugTemplate(tmpl)
 	// Execute the root template
-	err := tmpl.Execute(&buf, data)
+	err := tmpl.Execute(w, data)
 	if err != nil {
-		return "", fmt.Errorf("error rendering template %s: %v", name, err)
+		return fmt.Errorf("error rendering template %s: %v", name, err)
 	}
 
+	return nil
+}
+
+func (e *TemplateEngine) Render(name string, data interface{}) (string, error) {
+	var buf strings.Builder
+	err := e.renderTo(&buf, name, data)
+	if err != nil {
+		return "", err
+	}
 	return buf.String(), nil
 }
 
-//func extractBlockContent(nodes []parse.Node) (string, error) {
-//	var content strings.Builder
-//	for _, node := range nodes {
-//		switch n := node.(type) {
-//		case *parse.TextNode:
-//			content.WriteString(string(n.Text))
-//		case *parse.ActionNode:
-//			content.WriteString("{{")
-//			for i, cmd := range n.Pipe.Cmds {
-//				if i > 0 {
-//					content.WriteString(" | ")
-//				}
-//				for j, arg := range cmd.Args {
-//					if j > 0 {
-//						content.WriteString(" ")
-//					}
-//					content.WriteString(arg.String())
-//				}
-//			}
-//			content.WriteString("}}")
-//		case *parse.ListNode:
-//			if n != nil {
-//				listContent, err := extractBlockContent(n.Nodes)
-//				if err != nil {
-//					return "", err
-//				}
-//				content.WriteString(listContent)
-//			}
-//		}
-//	}
-//	return content.String(), nil
-//}
+func (e *TemplateEngine) RenderResponse(w io.Writer, name string, data interface{}) error {
+	return e.renderTo(w, name, data)
+}
 
 func DebugTemplate(t *template.Template) string {
 	var b strings.Builder
