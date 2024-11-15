@@ -14,6 +14,7 @@ TMPLX is a Go template engine that extends the standard `html/template` package 
 - **Custom Functions**: Full support for Go's template.FuncMap
 - **Filesystem Abstraction**: Works with regular files or embed.FS
 - **Zero External Dependencies**: Built on top of Go's standard library
+- **Multi source support**: Supports multiple sources for templates
 
 ## Installation
 
@@ -132,6 +133,28 @@ Include other templates:
 - Included templates have access to the current context
 - Can be used anywhere in templates
 - Supports nested includes
+
+### Multi Source Support
+
+TMPLX supports multiple sources for templates:
+
+Note: templates are processed in sequential order and can only inherit or include from same or previous sources. i.e you cannot include a template from a source that is loaded after the current source.
+
+```go
+   // Create engine with embed.FS
+engine := New(Options{
+   Sources: []Source{
+   // layouts/base.html
+   {FS: fsys1},
+   // pages/home.html
+   {FS: fsys2},
+   // home2.html
+   {FS: fsys3, Dir: "pages/"},
+   // partials/header.html
+   {Dir: "templates"},
+})
+
+ ```
 
 ## API Reference
 

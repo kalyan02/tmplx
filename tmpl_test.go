@@ -576,11 +576,7 @@ func TestTemplateFuncMap(t *testing.T) {
 		"<div>8</div>",
 	}
 
-	for _, part := range expectedParts {
-		if !strings.Contains(result, part) {
-			t.Errorf("Expected result to contain %q, got %q", part, result)
-		}
-	}
+	containsAll(t, expectedParts, result)
 }
 
 func TestTemplateEmbedFS(t *testing.T) {
@@ -629,6 +625,113 @@ func TestTemplateEmbedFS(t *testing.T) {
 	if !strings.Contains(result, "TEST") {
 		t.Errorf("Expected result to contain uppercase title")
 	}
+}
+
+func TestMultiRootTemplate(t *testing.T) {
+	tempDir, cleanup := setupTestTemplates(t)
+	defer cleanup()
+
+	// Create a testing filesystem
+	fsys1 := fstest.MapFS{
+		"layouts/base.html": &fstest.MapFile{
+			Data: []byte(`<!DOCTYPE html>
+					<html>
+					<head>
+						<title>{{block "title" .}}Default Title{{end}}</title>
+					</head>
+					<body>
+						{{block "content" .}}Default Content{{end}}
+					</body>
+					</html>`),
+		},
+	}
+
+	fsys2 := fstest.MapFS{
+		"pages/home.html": &fstest.MapFile{
+			Data: []byte(`
+					{{extend "layouts/base.html"}}
+					{{block "content" .}}
+						<h1>{{upper .Title}}</h1>
+					{{end}}`),
+		},
+	}
+
+	fsys3 := fstest.MapFS{
+		"pages/home2.html": &fstest.MapFile{
+			Data: []byte(`
+					{{extend "layouts/base.html"}}
+					{{block "content" .}}
+						<h2>{{lower .Title}}</h2>
+					{{end}}`),
+		},
+	}
+
+	writeTemplate(t, tempDir, "pages/home3.html", `
+		{{extend "layouts/base.html"}}
+		{{block "content" .}}
+			<h3>{{.Title}}</h3>
+		{{end}}
+	`)
+
+	// Create engine with embed.FS
+	engine := New(Options{
+		Sources: []Source{
+			// layouts/base.html
+			{FS: fsys1},
+			// pages/home.html
+			{FS: fsys2},
+			// home2.html
+			{FS: fsys3, Dir: "pages/"},
+			// pages/home3.html
+			{Dir: tempDir},
+		},
+		FuncMap: template.FuncMap{
+			"upper": strings.ToUpper,
+			"lower": strings.ToLower,
+		},
+	})
+
+	if err := engine.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("Inherits from file in different filesystem", func(t *testing.T) {
+		// Test rendering
+		result, err := engine.Render("pages/home.html", map[string]interface{}{
+			"Title": "Test",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !strings.Contains(result, "<h1>TEST</h1>") {
+			t.Errorf("Expected result to contain uppercase title")
+		}
+	})
+
+	t.Run("Inherits from file in different embedded filesystem and folder", func(t *testing.T) {
+		result, err := engine.Render("home2.html", map[string]interface{}{
+			"Title": "Test",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		containsAll(t, []string{"<h2>test</h2>"}, result)
+	})
+
+	t.Run("Inherits from file in different filesystem disk folder", func(t *testing.T) {
+		result, err := engine.Render("pages/home3.html", map[string]interface{}{
+			"Title": "Test",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		containsAll(t, []string{
+			"<title>Default Title</title>",
+			"<h3>Test</h3>",
+		}, result)
+	})
+
 }
 
 func BenchmarkTemplateEngine(b *testing.B) {
@@ -804,4 +907,12 @@ func BenchmarkTemplateEngine(b *testing.B) {
 			}
 		}
 	})
+}
+
+func containsAll(t *testing.T, expectedParts []string, result string) {
+	for _, part := range expectedParts {
+		if !strings.Contains(result, part) {
+			t.Errorf("Expected result to contain %q, got %q", part, result)
+		}
+	}
 }
