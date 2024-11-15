@@ -10,7 +10,7 @@ var (
 )
 
 // H is a shortcut for map[string]interface{}
-type H map[string]interface{}
+type H map[string]any
 
 // Load initializes the default template engine and loads all templates
 func Load(opts Options) error {

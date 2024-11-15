@@ -45,8 +45,7 @@ type inclCache struct {
 }
 
 type TemplateEngine struct {
-	root      string
-	fs        fs.FS
+	srcs      []Source
 	cache     map[string]*template.Template
 	loadCache map[string]*template.Template
 	inclCache map[string]*inclCache
@@ -63,6 +62,34 @@ type templateTree struct {
 	includes []string
 }
 
+type Source struct {
+	// Dir specifies the root directory for template files
+	Dir string
+
+	// FS provides an optional fs.FS implementation for reading templates
+	// If nil, os.DirFS(Dir) will be used
+	FS fs.FS
+}
+
+func setupSource(s *Source) {
+	if strings.HasSuffix(s.Dir, "/") {
+		s.Dir = strings.TrimSuffix(s.Dir, "/")
+	}
+
+	if s.FS == nil {
+		if s.Dir != "" {
+			s.FS = os.DirFS(s.Dir)
+		} else {
+			s.FS = os.DirFS(".")
+		}
+		s.Dir = "."
+	} else {
+		if s.Dir == "" {
+			s.Dir = "."
+		}
+	}
+}
+
 // Options holds configuration options for the template engine
 type Options struct {
 	// Dir specifies the root directory for template files
@@ -71,6 +98,9 @@ type Options struct {
 	// FS provides an optional fs.FS implementation for reading templates
 	// If nil, os.DirFS(Dir) will be used
 	FS fs.FS
+
+	// Sources specifies a list of directories and filesystems to load templates from
+	Sources []Source
 
 	// FuncMap defines custom template functions
 	// Note: 'extend', 'block' and 'include' are reserved function names
@@ -95,13 +125,13 @@ func (n *noopLogger) Infof(string, ...interface{}) {}
 func New(opts Options) *TemplateEngine {
 
 	// Set up the filesystem
-	var filesystem fs.FS
-	if opts.FS != nil {
-		filesystem = opts.FS
-	} else if opts.Dir != "" {
-		filesystem = os.DirFS(opts.Dir)
-	} else {
-		filesystem = os.DirFS(".")
+
+	if opts.Dir != "" || opts.FS != nil {
+		opts.Sources = append(opts.Sources, Source{Dir: opts.Dir, FS: opts.FS})
+	}
+
+	for i := range opts.Sources {
+		setupSource(&opts.Sources[i])
 	}
 
 	// Set up logger
@@ -131,8 +161,7 @@ func New(opts Options) *TemplateEngine {
 	}
 
 	return &TemplateEngine{
-		root:      ".",
-		fs:        filesystem,
+		srcs:      opts.Sources,
 		cache:     make(map[string]*template.Template),
 		loadCache: make(map[string]*template.Template),
 		inclCache: make(map[string]*inclCache),
@@ -177,9 +206,9 @@ func (e *TemplateEngine) AddFuncs(funcMap template.FuncMap) error {
 	return e.LoadTemplates()
 }
 
-func (e *TemplateEngine) parseTemplateFile(path string) (*templateTree, error) {
+func (e *TemplateEngine) parseTemplateFile(s Source, path string) (*templateTree, error) {
 
-	content, err := fs.ReadFile(e.fs, path)
+	content, err := fs.ReadFile(s.FS, path)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +288,7 @@ func (e *TemplateEngine) funcMapWithFuncs(funcs template.FuncMap) template.FuncM
 	return funcMap
 }
 
-func (e *TemplateEngine) resolveInheritance(name string, visited map[string]bool) (*template.Template, error) {
+func (e *TemplateEngine) resolveInheritance(s Source, name string, visited map[string]bool) (*template.Template, error) {
 	if visited[name] {
 		return nil, fmt.Errorf("circular template inheritance detected for %s", name)
 	}
@@ -272,8 +301,8 @@ func (e *TemplateEngine) resolveInheritance(name string, visited map[string]bool
 
 	e.logger.Infof("[TMPLX] Resolving inheritance for %s", name)
 
-	currentPath := filepath.Join(e.root, name)
-	tree, err := e.parseTemplateFile(currentPath)
+	currentPath := filepath.Join(s.Dir, name)
+	tree, err := e.parseTemplateFile(s, currentPath)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +312,7 @@ func (e *TemplateEngine) resolveInheritance(name string, visited map[string]bool
 		parentPath := tree.extends
 
 		// Resolve the parent template first
-		parentTemplate, err := e.resolveInheritance(parentPath, visited)
+		parentTemplate, err := e.resolveInheritance(s, parentPath, visited)
 		if err != nil {
 			return nil, fmt.Errorf("error resolving parent template %s: %v", parentPath, err)
 		}
@@ -306,7 +335,7 @@ func (e *TemplateEngine) resolveInheritance(name string, visited map[string]bool
 
 		// Process includes in the current content
 		currentContent := removeExtendDirective(tree.content)
-		processedContent, includeTmpl, err := e.processIncludes(currentContent, name, make(map[string]bool))
+		processedContent, includeTmpl, err := e.processIncludes(s, currentContent, name, make(map[string]bool))
 		if err != nil {
 			return nil, fmt.Errorf("error processing includes: %v", err)
 		}
@@ -344,7 +373,7 @@ func (e *TemplateEngine) resolveInheritance(name string, visited map[string]bool
 	baseTemplate := template.New(tree.name).Funcs(e.funcMap)
 
 	// Process includes first
-	processedContent, includeTmpl, err := e.processIncludes(tree.content, name, make(map[string]bool))
+	processedContent, includeTmpl, err := e.processIncludes(s, tree.content, name, make(map[string]bool))
 	if err != nil {
 		return nil, fmt.Errorf("error processing includes: %v", err)
 	}
@@ -395,7 +424,7 @@ func (e *TemplateEngine) copyTemplates(baseTemplate *template.Template, includeT
 	return nil
 }
 
-func (e *TemplateEngine) processIncludes(content string, currentFile string, visited map[string]bool) (string, *template.Template, error) {
+func (e *TemplateEngine) processIncludes(s Source, content string, currentFile string, visited map[string]bool) (string, *template.Template, error) {
 	if tmpl, ok := e.inclCache[currentFile]; ok {
 		e.logger.Infof("[TMPLX] Returning cached include file %s", currentFile)
 		return tmpl.content, tmpl.tmpl, nil
@@ -433,8 +462,8 @@ func (e *TemplateEngine) processIncludes(content string, currentFile string, vis
 							}
 
 							// Read the included template
-							includeFullPath := filepath.Join(e.root, includePath)
-							includeContent, err := fs.ReadFile(e.fs, includeFullPath)
+							includeFullPath := filepath.Join(s.Dir, includePath)
+							includeContent, err := fs.ReadFile(s.FS, includeFullPath)
 							if err != nil {
 								return "", nil, fmt.Errorf("error reading include %s: %v", includePath, err)
 							}
@@ -446,7 +475,7 @@ func (e *TemplateEngine) processIncludes(content string, currentFile string, vis
 							}
 							visitedCopy[includePath] = true
 
-							processedInclude, includeTmpl, err := e.processIncludes(string(includeContent), includePath, visitedCopy)
+							processedInclude, includeTmpl, err := e.processIncludes(s, string(includeContent), includePath, visitedCopy)
 							if err != nil {
 								return "", nil, fmt.Errorf("error processing nested includes in %s: %v", includePath, err)
 							}
@@ -498,8 +527,17 @@ func removeExtendDirective(content string) string {
 }
 
 func (e *TemplateEngine) LoadTemplates() error {
+	for i, s := range e.srcs {
+		if err := e.loadTemplatesForSource(s); err != nil {
+			return fmt.Errorf("error loading templates from source %d: %v", i, err)
+		}
+	}
+	return nil
+}
+
+func (e *TemplateEngine) loadTemplatesForSource(s Source) error {
 	e.logger.Infof("[TMPLX] Loading templates")
-	return fs.WalkDir(e.fs, e.root, func(path string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(s.FS, s.Dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -508,14 +546,14 @@ func (e *TemplateEngine) LoadTemplates() error {
 			return nil
 		}
 
-		relPath, err := filepath.Rel(e.root, path)
+		relPath, err := filepath.Rel(s.Dir, path)
 		if err != nil {
 			return err
 		}
 
 		// Resolve template inheritance
 		e.logger.Infof("[TMPLX] Processing %s", relPath)
-		tmpl, err := e.resolveInheritance(relPath, make(map[string]bool))
+		tmpl, err := e.resolveInheritance(s, relPath, make(map[string]bool))
 		if err != nil {
 			return fmt.Errorf("error resolving inheritance for %s: %v", relPath, err)
 		}
