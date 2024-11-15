@@ -141,17 +141,18 @@ TMPLX supports multiple sources for templates:
 Note: templates are processed in sequential order and can only inherit or include from same or previous sources. i.e you cannot include a template from a source that is loaded after the current source.
 
 ```go
-   // Create engine with embed.FS
+// Create engine with embed.FS
 engine := New(Options{
-   Sources: []Source{
-   // layouts/base.html
-   {FS: fsys1},
-   // pages/home.html
-   {FS: fsys2},
-   // home2.html
-   {FS: fsys3, Dir: "pages/"},
-   // partials/header.html
-   {Dir: "templates"},
+  Sources: []Source{
+      // layouts/base.html in root of embed fs fsys1
+      {FS: fsys1},
+      // pages/home.html in root of embed fs fsys2
+      {FS: fsys2},
+      // home2.html in "pages" folder in fsys3 embed fs
+      {FS: fsys3, Dir: "pages/"},
+      // partials/header.html from "templates" folder on disk
+      {Dir: "templates"},
+   }
 })
 
  ```
