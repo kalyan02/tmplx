@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"text/template/parse"
 )
 
@@ -15,9 +16,9 @@ import (
 // It extends Go's html/template package to add template inheritance similar to Django/Jinja2.
 //
 // Features:
-// - Template inheritance with {% extend "base.html" %}
+// - Template inheritance with {{extend "base.html"}}
 // - Block definitions and overriding
-// - Template includes
+// - Template includes with {{include "partial.html" .}}
 // - Custom function maps
 // - File system abstraction (works with embed.FS)
 //
@@ -38,20 +39,35 @@ import (
 
 // TemplateEngine manages template loading, caching and rendering with inheritance support.
 // It provides a layer on top of html/template to support template inheritance and includes.
+//
+// TemplateEngine is safe for concurrent use. The template cache is immutable once loaded,
+// and Load/AddFuncs operations atomically swap the entire cache to ensure readers never
+// see partial state.
 
-type inclCache struct {
+// templateState holds the immutable template cache state.
+// This entire struct is swapped atomically during Load/AddFuncs operations,
+// ensuring lock-free read access during rendering.
+type templateState struct {
+	cache map[string]*template.Template // Final compiled templates for rendering
+}
+
+// loadContext holds temporary state used only during the loading phase.
+// It is discarded after loading completes, freeing memory.
+type loadContext struct {
+	loadCache map[string]*template.Template // Inheritance resolution cache
+	inclCache map[string]*inclCacheEntry    // Include file cache
+}
+
+type inclCacheEntry struct {
 	content string
 	tmpl    *template.Template
 }
 
 type TemplateEngine struct {
-	srcs      []Source
-	cache     map[string]*template.Template
-	loadCache map[string]*template.Template
-	inclCache map[string]*inclCache
-	funcMap   template.FuncMap
-	loaded    bool
-	logger    Logger
+	srcs    []Source
+	state   atomic.Pointer[templateState] // Immutable cache, swapped atomically
+	funcMap template.FuncMap
+	logger  Logger
 }
 
 type templateTree struct {
@@ -111,12 +127,12 @@ type Options struct {
 }
 
 type Logger interface {
-	Infof(format string, args ...interface{})
+	Infof(format string, args ...any)
 }
 
 type noopLogger struct{}
 
-func (n *noopLogger) Infof(string, ...interface{}) {}
+func (n *noopLogger) Infof(string, ...any) {}
 
 // New creates a new template engine with the given options.
 // If no filesystem is provided in options, it will use os.DirFS with the specified directory.
@@ -148,7 +164,7 @@ func New(opts Options) *TemplateEngine {
 		"block": func(name string) (string, error) {
 			return "", fmt.Errorf("block can only be called during template parsing")
 		},
-		"include": func(name string, data interface{}) (string, error) {
+		"include": func(name string, data any) (string, error) {
 			return "", fmt.Errorf("include can only be called during template parsing")
 		},
 	}
@@ -161,28 +177,23 @@ func New(opts Options) *TemplateEngine {
 	}
 
 	return &TemplateEngine{
-		srcs:      opts.Sources,
-		cache:     make(map[string]*template.Template),
-		loadCache: make(map[string]*template.Template),
-		inclCache: make(map[string]*inclCache),
-		funcMap:   funcMap,
-		logger:    logger,
+		srcs:    opts.Sources,
+		funcMap: funcMap,
+		logger:  logger,
 	}
 }
 
 // Load loads all templates from the filesystem into memory.
 // This must be called before using the engine for rendering.
 // It will parse all .html files and resolve template inheritance.
+//
+// Load is safe to call multiple times - it will reload all templates.
+// Load is safe to call concurrently with Render - readers will see
+// either the old or new state, never a partial state.
 func (e *TemplateEngine) Load() error {
-	if e.loaded {
-		return nil
-	}
-
 	if err := e.LoadTemplates(); err != nil {
 		return fmt.Errorf("failed to load templates: %v", err)
 	}
-
-	e.loaded = true
 	return nil
 }
 
@@ -259,7 +270,7 @@ func (e *TemplateEngine) parseTemplateFile(s Source, path string) (*templateTree
 
 	// Now create template without extend function
 	tmpl := template.New(tree.name).Funcs(e.funcMapWithFuncs(template.FuncMap{
-		"block":   func(string, interface{}) (string, error) { return "", nil },
+		"block":   func(string, any) (string, error) { return "", nil },
 		"include": func(string) (string, error) { return "", nil },
 	}))
 
@@ -288,13 +299,13 @@ func (e *TemplateEngine) funcMapWithFuncs(funcs template.FuncMap) template.FuncM
 	return funcMap
 }
 
-func (e *TemplateEngine) resolveInheritance(s Source, name string, visited map[string]bool) (*template.Template, error) {
+func (e *TemplateEngine) resolveInheritance(lctx *loadContext, s Source, name string, visited map[string]bool) (*template.Template, error) {
 	if visited[name] {
 		return nil, fmt.Errorf("circular template inheritance detected for %s", name)
 	}
 	visited[name] = true
 
-	if tmpl, ok := e.loadCache[name]; ok {
+	if tmpl, ok := lctx.loadCache[name]; ok {
 		e.logger.Infof("[TMPLX] Returning cached inheritance for %s", name)
 		return tmpl, nil
 	}
@@ -312,7 +323,7 @@ func (e *TemplateEngine) resolveInheritance(s Source, name string, visited map[s
 		parentPath := tree.extends
 
 		// Resolve the parent template first
-		parentTemplate, err := e.resolveInheritance(s, parentPath, visited)
+		parentTemplate, err := e.resolveInheritance(lctx, s, parentPath, visited)
 		if err != nil {
 			return nil, fmt.Errorf("error resolving parent template %s: %v", parentPath, err)
 		}
@@ -331,11 +342,9 @@ func (e *TemplateEngine) resolveInheritance(s Source, name string, visited map[s
 			return nil, err
 		}
 
-		//DebugTemplate(baseTemplate)
-
 		// Process includes in the current content
-		currentContent := removeExtendDirective(tree.content)
-		processedContent, includeTmpl, err := e.processIncludes(s, currentContent, name, make(map[string]bool))
+		// Note: tree.content already has extend directive removed by parseTemplateFile
+		processedContent, includeTmpl, err := e.processIncludes(lctx, s, tree.content, name, make(map[string]bool))
 		if err != nil {
 			return nil, fmt.Errorf("error processing includes: %v", err)
 		}
@@ -361,10 +370,7 @@ func (e *TemplateEngine) resolveInheritance(s Source, name string, visited map[s
 			return nil, err
 		}
 
-		//DebugTemplate(baseTemplate)
-
-		_ = baseTemplate
-		e.loadCache[name] = baseTemplate
+		lctx.loadCache[name] = baseTemplate
 		return baseTemplate, nil
 
 	}
@@ -373,7 +379,7 @@ func (e *TemplateEngine) resolveInheritance(s Source, name string, visited map[s
 	baseTemplate := template.New(tree.name).Funcs(e.funcMap)
 
 	// Process includes first
-	processedContent, includeTmpl, err := e.processIncludes(s, tree.content, name, make(map[string]bool))
+	processedContent, includeTmpl, err := e.processIncludes(lctx, s, tree.content, name, make(map[string]bool))
 	if err != nil {
 		return nil, fmt.Errorf("error processing includes: %v", err)
 	}
@@ -387,16 +393,12 @@ func (e *TemplateEngine) resolveInheritance(s Source, name string, visited map[s
 	}
 
 	// Parse the current template's content - this will define/override blocks
-	// First remove any extend directive from the current template
 	_, err = baseTemplate.Parse(processedContent)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing template %s: %v", name, err)
 	}
 
-	//DebugTemplate(baseTemplate)
-	_ = baseTemplate
-
-	e.loadCache[name] = baseTemplate
+	lctx.loadCache[name] = baseTemplate
 	return baseTemplate, nil
 }
 
@@ -424,10 +426,10 @@ func (e *TemplateEngine) copyTemplates(baseTemplate *template.Template, includeT
 	return nil
 }
 
-func (e *TemplateEngine) processIncludes(s Source, content string, currentFile string, visited map[string]bool) (string, *template.Template, error) {
-	if tmpl, ok := e.inclCache[currentFile]; ok {
+func (e *TemplateEngine) processIncludes(lctx *loadContext, s Source, content string, currentFile string, visited map[string]bool) (string, *template.Template, error) {
+	if entry, ok := lctx.inclCache[currentFile]; ok {
 		e.logger.Infof("[TMPLX] Returning cached include file %s", currentFile)
-		return tmpl.content, tmpl.tmpl, nil
+		return entry.content, entry.tmpl, nil
 	}
 
 	e.logger.Infof("[TMPLX] Processing include file %s", currentFile)
@@ -475,7 +477,7 @@ func (e *TemplateEngine) processIncludes(s Source, content string, currentFile s
 							}
 							visitedCopy[includePath] = true
 
-							processedInclude, includeTmpl, err := e.processIncludes(s, string(includeContent), includePath, visitedCopy)
+							processedInclude, includeTmpl, err := e.processIncludes(lctx, s, string(includeContent), includePath, visitedCopy)
 							if err != nil {
 								return "", nil, fmt.Errorf("error processing nested includes in %s: %v", includePath, err)
 							}
@@ -507,7 +509,7 @@ func (e *TemplateEngine) processIncludes(s Source, content string, currentFile s
 		return "", nil, fmt.Errorf("error parsing processed content: %v", err)
 	}
 
-	e.inclCache[currentFile] = &inclCache{
+	lctx.inclCache[currentFile] = &inclCacheEntry{
 		content: processed,
 		tmpl:    collectingTmpl,
 	}
@@ -515,27 +517,31 @@ func (e *TemplateEngine) processIncludes(s Source, content string, currentFile s
 	return processed, collectingTmpl, nil
 }
 
-// Helper function to remove extend directive
-func removeExtendDirective(content string) string {
-	if idx := strings.Index(content, `{{extend "`); idx != -1 {
-		if endIdx := strings.Index(content[idx:], `"}}`); endIdx != -1 {
-			endIdx += idx + 3
-			return content[:idx] + content[endIdx:]
-		}
-	}
-	return content
-}
-
 func (e *TemplateEngine) LoadTemplates() error {
+	// Create fresh loading context and new state
+	// These are temporary and will be discarded after loading
+	lctx := &loadContext{
+		loadCache: make(map[string]*template.Template),
+		inclCache: make(map[string]*inclCacheEntry),
+	}
+	newState := &templateState{
+		cache: make(map[string]*template.Template),
+	}
+
 	for i, s := range e.srcs {
-		if err := e.loadTemplatesForSource(s); err != nil {
+		if err := e.loadTemplatesForSource(lctx, newState, s); err != nil {
 			return fmt.Errorf("error loading templates from source %d: %v", i, err)
 		}
 	}
+
+	// Atomically swap the state - readers will see either old or new, never partial
+	e.state.Store(newState)
+
+	// lctx is now eligible for garbage collection, freeing intermediate caches
 	return nil
 }
 
-func (e *TemplateEngine) loadTemplatesForSource(s Source) error {
+func (e *TemplateEngine) loadTemplatesForSource(lctx *loadContext, newState *templateState, s Source) error {
 	e.logger.Infof("[TMPLX] Loading templates")
 	return fs.WalkDir(s.FS, s.Dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -553,18 +559,22 @@ func (e *TemplateEngine) loadTemplatesForSource(s Source) error {
 
 		// Resolve template inheritance
 		e.logger.Infof("[TMPLX] Processing %s", relPath)
-		tmpl, err := e.resolveInheritance(s, relPath, make(map[string]bool))
+		tmpl, err := e.resolveInheritance(lctx, s, relPath, make(map[string]bool))
 		if err != nil {
 			return fmt.Errorf("error resolving inheritance for %s: %v", relPath, err)
 		}
 
-		e.cache[relPath] = tmpl
+		newState.cache[relPath] = tmpl
 		return nil
 	})
 }
 
 func (e *TemplateEngine) GetTemplate(name string) (*template.Template, error) {
-	tmpl, exists := e.cache[name]
+	state := e.state.Load()
+	if state == nil {
+		return nil, fmt.Errorf("template engine not loaded, call Load() first")
+	}
+	tmpl, exists := state.cache[name]
 	if !exists {
 		return nil, fmt.Errorf("template %s not found", name)
 	}
@@ -579,8 +589,12 @@ func (e *TemplateEngine) MustGetTemplate(name string) *template.Template {
 	return tmpl
 }
 
-func (e *TemplateEngine) renderTo(w io.Writer, name string, data interface{}) error {
-	tmpl, exists := e.cache[name]
+func (e *TemplateEngine) renderTo(w io.Writer, name string, data any) error {
+	state := e.state.Load()
+	if state == nil {
+		return fmt.Errorf("template engine not loaded, call Load() first")
+	}
+	tmpl, exists := state.cache[name]
 	if !exists {
 		return fmt.Errorf("template %s not found", name)
 	}
@@ -594,7 +608,7 @@ func (e *TemplateEngine) renderTo(w io.Writer, name string, data interface{}) er
 	return nil
 }
 
-func (e *TemplateEngine) Render(name string, data interface{}) (string, error) {
+func (e *TemplateEngine) Render(name string, data any) (string, error) {
 	var buf strings.Builder
 	err := e.renderTo(&buf, name, data)
 	if err != nil {
@@ -603,7 +617,7 @@ func (e *TemplateEngine) Render(name string, data interface{}) (string, error) {
 	return buf.String(), nil
 }
 
-func (e *TemplateEngine) RenderResponse(w io.Writer, name string, data interface{}) error {
+func (e *TemplateEngine) RenderResponse(w io.Writer, name string, data any) error {
 	return e.renderTo(w, name, data)
 }
 
