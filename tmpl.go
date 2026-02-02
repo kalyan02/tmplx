@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -72,11 +73,10 @@ type TemplateEngine struct {
 }
 
 type templateTree struct {
-	name     string
-	content  string
-	extends  string
-	blocks   map[string]string
-	includes []string
+	name    string
+	content string
+	extends string
+	blocks  map[string]string
 }
 
 type Source struct {
@@ -177,7 +177,7 @@ func New(opts Options) *TemplateEngine {
 
 	// Add user-provided functions
 	for name, fn := range opts.FuncMap {
-		if name != "extend" && name != "include" {
+		if name != "extend" && name != "include" && name != "block" {
 			funcMap[name] = fn
 		}
 	}
@@ -238,10 +238,9 @@ func (e *TemplateEngine) parseTemplateFile(s Source, path string) (*templateTree
 	}
 
 	tree := &templateTree{
-		name:     filepath.Base(path),
-		content:  string(content),
-		blocks:   make(map[string]string),
-		includes: []string{},
+		name:    filepath.Base(path),
+		content: string(content),
+		blocks:  make(map[string]string),
 	}
 
 	// First do a pre-parse scan for extend directive
@@ -266,13 +265,6 @@ func (e *TemplateEngine) parseTemplateFile(s Source, path string) (*templateTree
 							if str, ok := cmd.Args[1].(*parse.StringNode); ok {
 								tree.extends = str.Text
 								tree.content = strings.Replace(tree.content, node.String(), "", 1)
-							}
-						case "include":
-							if len(cmd.Args) < 2 {
-								return nil, fmt.Errorf("include requires at least one argument")
-							}
-							if str, ok := cmd.Args[1].(*parse.StringNode); ok {
-								tree.includes = append(tree.includes, str.Text)
 							}
 						}
 					}
@@ -325,7 +317,7 @@ func (e *TemplateEngine) resolveInheritance(lctx *loadContext, s Source, name st
 
 	e.logger.Infof("[TMPLX] Resolving inheritance for %s", name)
 
-	currentPath := filepath.Join(s.Dir, name)
+	currentPath := path.Join(s.Dir, name)
 	tree, err := e.parseTemplateFile(s, currentPath)
 	if err != nil {
 		return nil, err
@@ -477,7 +469,7 @@ func (e *TemplateEngine) processIncludes(lctx *loadContext, s Source, content st
 							}
 
 							// Read the included template
-							includeFullPath := filepath.Join(s.Dir, includePath)
+							includeFullPath := path.Join(s.Dir, includePath)
 							includeContent, err := fs.ReadFile(s.FS, includeFullPath)
 							if err != nil {
 								return "", nil, fmt.Errorf("error reading include %s: %v", includePath, err)
@@ -602,6 +594,30 @@ func (e *TemplateEngine) GetTemplate(name string) (*template.Template, error) {
 		return nil, fmt.Errorf("template %s not found", name)
 	}
 	return tmpl, nil
+}
+
+// ListTemplates returns the names of all loaded templates.
+// The order is not guaranteed.
+func (e *TemplateEngine) ListTemplates() []string {
+	state := e.state.Load()
+	if state == nil {
+		return nil
+	}
+	names := make([]string, 0, len(state.cache))
+	for name := range state.cache {
+		names = append(names, name)
+	}
+	return names
+}
+
+// HasTemplate reports whether a template with the given name is loaded.
+func (e *TemplateEngine) HasTemplate(name string) bool {
+	state := e.state.Load()
+	if state == nil {
+		return false
+	}
+	_, ok := state.cache[name]
+	return ok
 }
 
 func (e *TemplateEngine) MustGetTemplate(name string) *template.Template {
