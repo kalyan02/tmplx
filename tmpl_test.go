@@ -909,6 +909,88 @@ func BenchmarkTemplateEngine(b *testing.B) {
 	})
 }
 
+func TestCustomExtensions(t *testing.T) {
+	// Create a testing filesystem with different extensions
+	fsys := fstest.MapFS{
+		"layouts/base.gohtml": &fstest.MapFile{
+			Data: []byte(`<!DOCTYPE html>
+<html>
+<head><title>{{block "title" .}}Default{{end}}</title></head>
+<body>{{block "content" .}}{{end}}</body>
+</html>`),
+		},
+		"pages/home.tmpl": &fstest.MapFile{
+			Data: []byte(`{{extend "layouts/base.gohtml"}}
+{{block "title" .}}{{.Title}}{{end}}
+{{block "content" .}}<h1>{{.Title}}</h1>{{end}}`),
+		},
+		"ignored/file.txt": &fstest.MapFile{
+			Data: []byte(`This should be ignored`),
+		},
+		"pages/also_ignored.html": &fstest.MapFile{
+			Data: []byte(`{{extend "layouts/base.gohtml"}}
+{{block "content"}}<p>HTML file</p>{{end}}`),
+		},
+	}
+
+	t.Run("loads only specified extensions", func(t *testing.T) {
+		engine := New(Options{
+			FS:         fsys,
+			Extensions: []string{".gohtml", ".tmpl"},
+		})
+
+		if err := engine.Load(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Should be able to render .tmpl file
+		result, err := engine.Render("pages/home.tmpl", map[string]any{
+			"Title": "Custom Extensions",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !strings.Contains(result, "<h1>Custom Extensions</h1>") {
+			t.Errorf("Expected .tmpl file to render, got: %s", result)
+		}
+
+		// Should NOT have loaded .html file (not in extensions list)
+		_, err = engine.Render("pages/also_ignored.html", nil)
+		if err == nil {
+			t.Error("Expected .html file to not be loaded when not in extensions")
+		}
+	})
+
+	t.Run("defaults to .html when no extensions specified", func(t *testing.T) {
+		htmlFS := fstest.MapFS{
+			"page.html": &fstest.MapFile{
+				Data: []byte(`<p>{{.Text}}</p>`),
+			},
+			"page.gohtml": &fstest.MapFile{
+				Data: []byte(`<p>gohtml</p>`),
+			},
+		}
+
+		engine := New(Options{FS: htmlFS})
+		if err := engine.Load(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Should load .html
+		_, err := engine.Render("page.html", map[string]any{"Text": "hello"})
+		if err != nil {
+			t.Fatalf("Expected .html to be loaded by default: %v", err)
+		}
+
+		// Should NOT load .gohtml
+		_, err = engine.Render("page.gohtml", nil)
+		if err == nil {
+			t.Error("Expected .gohtml to not be loaded when using default extensions")
+		}
+	})
+}
+
 func containsAll(t *testing.T, expectedParts []string, result string) {
 	for _, part := range expectedParts {
 		if !strings.Contains(result, part) {

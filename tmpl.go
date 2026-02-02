@@ -64,10 +64,11 @@ type inclCacheEntry struct {
 }
 
 type TemplateEngine struct {
-	srcs    []Source
-	state   atomic.Pointer[templateState] // Immutable cache, swapped atomically
-	funcMap template.FuncMap
-	logger  Logger
+	srcs       []Source
+	extensions []string                       // File extensions to load (e.g., ".html", ".gohtml")
+	state      atomic.Pointer[templateState]  // Immutable cache, swapped atomically
+	funcMap    template.FuncMap
+	logger     Logger
 }
 
 type templateTree struct {
@@ -117,6 +118,11 @@ type Options struct {
 
 	// Sources specifies a list of directories and filesystems to load templates from
 	Sources []Source
+
+	// Extensions specifies which file extensions to load as templates.
+	// If empty, defaults to []string{".html"}.
+	// Example: []string{".html", ".gohtml", ".tmpl"}
+	Extensions []string
 
 	// FuncMap defines custom template functions
 	// Note: 'extend', 'block' and 'include' are reserved function names
@@ -176,10 +182,17 @@ func New(opts Options) *TemplateEngine {
 		}
 	}
 
+	// Set up extensions with default
+	extensions := opts.Extensions
+	if len(extensions) == 0 {
+		extensions = []string{".html"}
+	}
+
 	return &TemplateEngine{
-		srcs:    opts.Sources,
-		funcMap: funcMap,
-		logger:  logger,
+		srcs:       opts.Sources,
+		extensions: extensions,
+		funcMap:    funcMap,
+		logger:     logger,
 	}
 }
 
@@ -548,7 +561,7 @@ func (e *TemplateEngine) loadTemplatesForSource(lctx *loadContext, newState *tem
 			return err
 		}
 
-		if d.IsDir() || !strings.HasSuffix(path, ".html") {
+		if d.IsDir() || !e.hasValidExtension(path) {
 			return nil
 		}
 
@@ -567,6 +580,16 @@ func (e *TemplateEngine) loadTemplatesForSource(lctx *loadContext, newState *tem
 		newState.cache[relPath] = tmpl
 		return nil
 	})
+}
+
+// hasValidExtension checks if the path has one of the configured template extensions
+func (e *TemplateEngine) hasValidExtension(path string) bool {
+	for _, ext := range e.extensions {
+		if strings.HasSuffix(path, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *TemplateEngine) GetTemplate(name string) (*template.Template, error) {
